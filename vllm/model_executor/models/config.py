@@ -580,6 +580,60 @@ class DeepseekV32ForCausalLM(DeepseekV3ForCausalLM):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class Siglip2EmbeddingModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Ensure max_model_len >= max_num_patches for SigLIP2 NaFlex.
+
+        SigLIP2 image inputs produce max_num_patches tokens. The text model's
+        max_position_embeddings is only 64, but image sequences can be much
+        longer (e.g., 256 or 512). We override derived_max_model_len so that
+        vLLM doesn't reject image requests.
+        """
+        hf_config = model_config.hf_config
+        vision_config = hf_config.vision_config
+        num_patches = vision_config.num_patches  # default from config
+
+        # Check if mm_processor_kwargs overrides max_num_patches
+        mm_kwargs = {}
+        mm_config = getattr(model_config, "multimodal_config", None)
+        if mm_config is not None:
+            mm_kwargs = mm_config.mm_processor_kwargs or {}
+
+        max_num_patches = int(mm_kwargs.get("max_num_patches", num_patches))
+
+        # max_model_len must be >= max_num_patches
+        current_derived, current_key = (
+            model_config.model_arch_config.derived_max_model_len_and_key
+        )
+
+        if current_derived < max_num_patches:
+            logger.info(
+                "SigLIP2: Overriding derived_max_model_len from %d to %d "
+                "(max_num_patches=%d)",
+                int(current_derived), max_num_patches, max_num_patches,
+            )
+            model_config.model_arch_config.derived_max_model_len_and_key = (
+                float(max_num_patches),
+                "vision_config.num_patches",
+            )
+
+        # Also update max_model_len if it was auto-derived (None or -1)
+        if (model_config.original_max_model_len is None
+                or model_config.original_max_model_len == -1):
+            model_config.max_model_len = max(
+                model_config.max_model_len, max_num_patches
+            )
+        elif model_config.max_model_len < max_num_patches:
+            logger.warning(
+                "SigLIP2: max_model_len=%d is less than max_num_patches=%d. "
+                "Image embedding requests will fail. Consider using "
+                "--max-model-len %d or higher.",
+                model_config.max_model_len, max_num_patches,
+                max_num_patches,
+            )
+
+
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -661,4 +715,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
+    "Siglip2ForImageClassification": Siglip2EmbeddingModelConfig,
+    "Siglip2Model": Siglip2EmbeddingModelConfig,
 }
